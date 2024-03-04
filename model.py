@@ -47,6 +47,7 @@ from sklearn.preprocessing import MinMaxScaler
 from decimal import Decimal
 import sys
 import socket
+import random
 
 #讀進商品分類表，後續匹配會須使用
 #解決從外部呼叫時Python路徑的問題，先找到這份檔案的上一層資料夾，再合併路徑
@@ -156,10 +157,12 @@ def data_modeling(mode,**kwargs):
         data = data.explode("item_gain") #將list解開巢狀結構，變成列
         data['count'] = data['item_gain'].apply(lambda x : find_count(x))   #取出商品數量
         data['item_gain'] = data['item_gain'].apply(lambda x:x.split('*')[0])  #取出商品名稱
-        data['item'] = data[['reason',"item_gain"]].apply(lambda x:item(x),axis=1)  #連結途徑+商品名稱，代表1件商品
+        data['item'] = data.loc[:, ['reason',"item_gain"]].apply(lambda x:item(x),axis=1)  #連結途徑+商品名稱，代表1件商品
         data = data[data['item'].isin(list(category.keys()))]    #限定商品只能在'分類 - 排序細項.csv'中，其他的難以推薦
+        # data['map_cat'] = data['item'].map(category)             # 創建對應類別，用於篩選
+        # data = data[~data['map_cat'].str.contains('培養')]        # 排除培養類別
         data['item'] = data['item'].apply(lambda x:clothes(x))   #把時裝名稱替換，改為時裝大的歸類 (來自excel)
-        
+
         data = pd.crosstab(data['#account_id'],data['item'],values=data['count'],aggfunc=sum) #將直的內容展開
         data = data.reset_index()
         data.fillna(0,inplace=True)
@@ -317,12 +320,10 @@ def data_modeling(mode,**kwargs):
         predict = kwargs["data"]   #把建立好的dataset讀出來
         #抓取當日DAU (排除付費玩家)，後續建立預測清單用
         #因為之前建立dataset時就已經篩過一次，不用重撈SQL了
-        
-        
-        #讀入建立模型使用的全部購買data
+
+        # 讀入建立模型使用的全部購買data
         data = pd.read_csv(folder_path + '/all_buy_list.csv')
-        
-        
+
         #建立用戶及商品矩陣
         user = data["#account_id"]
         user_map = dict()
@@ -346,26 +347,48 @@ def data_modeling(mode,**kwargs):
         data = pd.melt(data, id_vars=['#account_id'], value_vars=data.columns[1:])   #將cross_table收回為直式
         data = data[data['value']!=0]
         del data_scaled
-         
+
         
         try:
                 model_path = kwargs["model_path"]
                 with open(model_path, 'rb') as f:
                     model = pkl.load(f)
                     
-                    
+                # 先推前50項商品，再把培養類別刪除
                 def item_predict(x):
                     try:
                         userid = reverse_user_map[x]     #回傳ID對應的索引編號，這編號來代表userid
-                        ids, scores = model.recommend(userid, user_item_data[userid], N=3         #id, id對應的向量，推薦3項商品
+                        ids, scores = model.recommend(userid, user_item_data[userid], N=50         #id, id對應的向量，推薦3項商品
                                               , filter_already_liked_items=True)   #不推薦已經購買的商品，輸出3個商品序列、3個商品分數
                         rec_item = [category.get(item_map[x], item_map[x]) for x in ids]   #商品序列對應到商品名稱，再用名稱對應3類別的list
-                      #這邊使用dict.get是為了時裝因為做過轉換了，所以不會對應到對照表，會以原值表示 (已轉換過)
-                      #  cat = most_frequent(rec_item)
-                        return rec_item, [item_map[x] for x in ids], scores #cat
+                        # 這邊使用dict.get是為了時裝因為做過轉換了，所以不會對應到對照表，會以原值表示 (已轉換過)
+                        #  cat = most_frequent(rec_item)
+                        rec_raw = [item_map[x] for x in ids]    # 推薦原始商品
+
+                        # 以下為培養類別處理
+                        # rec_item = ['培養球員', '時裝', '培養技能', '培養技能', '培養技能', '慶祝']
+                        # rec_raw = ['3', '1', '2', '3', '1', '1']
+                        # scores = ['a', 'dddd', 'ff', '3', '1', '9']
+                        filter_index = [index for index, item in enumerate(rec_item) if '培養' not in item]         # 排除培養
+                        filter_index = filter_index[:3]                                                            # 取前3
+                        rec_item, rec_raw, scores = map(list, zip(*[(rec_item[x], rec_raw[x], scores[x]) for x in filter_index]))    # 只取培養的位置元素，轉為列表
+
+                        # 如果排除培養後，推薦商品元素不滿3個
+                        if len(rec_item) < 3:
+                            all_cat = list(set(list(category.values())))      # 把分類字典的值，取出唯一，再排除培養，這是隨機抽樣補商品清單
+                            all_cat = [item for item in all_cat if '培養' not in item]
+                            add_sample_list = random.sample(all_cat, 3 - len(rec_item))                  # 看缺多少補為3個商品
+
+                            rec_item.extend(add_sample_list)                                 # 補商品
+                            rec_raw.extend(['隨機補商品']* (3 - len(rec_raw)))                 # 補商品細項 : 隨機補商品
+                            scores.extend([0] * (3 - len(scores)))                           # 補分數為0
+
+                        return rec_item, rec_raw, scores  #cat
                     except:                               #沒綁鑽消費紀錄，故不推薦，或消費的商品被排掉了
                         return 'no data','no data','no data'
-                            
+
+                # predict = pd.read_csv('dataset.csv')
+
                 #回傳推薦類別、細項、預測分數
                 #predict['rec'] = predict['#account_id'].apply(lambda x:item_predict(x))
                 predict[['rec', 'ids', 'scores']] = predict['#account_id'].apply(item_predict).apply(pd.Series)
