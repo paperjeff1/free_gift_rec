@@ -393,7 +393,9 @@ def data_modeling(mode,**kwargs):
                 #predict['rec'] = predict['#account_id'].apply(lambda x:item_predict(x))
                 predict[['rec', 'ids', 'scores']] = predict['#account_id'].apply(item_predict).apply(pd.Series)
                 predict = predict[predict['rec']!='no data']     # 把沒資料的排除掉，3個欄位都是no data
-                
+                # 預防分數取出來為負，遇到負的取代為0
+                predict['scores'] = predict['scores'].apply(lambda lst: [0 if x < 0 else x for x in lst])
+
                 #每列取3項物品的平均分數
                 predict['avg_scores'] = predict['scores'].apply(pd.Series).mean(axis=1)
                 #依據平均預測分數分組，低中高
